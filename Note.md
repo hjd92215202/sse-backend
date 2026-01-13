@@ -1,25 +1,62 @@
-此阶段的关键细节说明
+--pg
+CREATE TABLE t_finance_detail (
+    id SERIAL PRIMARY KEY,
+    platform_name VARCHAR(100),
+    amount NUMERIC(15, 2),
+    dt DATE
+);
+INSERT INTO t_finance_detail (platform_name, amount, dt) VALUES ('A公司', 5000.00, '2025-01-01');
+-mysql
 
-原子性与一致性：
+CREATE TABLE t_operation_revenue (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    corp_name VARCHAR(100),
+    income DECIMAL(15, 2),
+    created_at DATETIME
+);
+INSERT INTO t_operation_revenue (corp_name, income, created_at) VALUES ('B公司', 8888.88, NOW());
 
-我们使用了 ON CONFLICT (entity_key)。这意味着如果前端多次保存同一个实体（比如“分润平台”），后端会自动执行更新（Update）而不是插入重复数据。
+通过 API 注册数据源与映射
 
-热重载：注意 refresh_fst_cache 函数。通过 RwLock 的写锁（.write().await），我们确保了在重建索引的一瞬间，查询接口会阻塞几毫秒，等新索引挂载后再恢复。这保证了**“配置即生效”**。
+curl -X POST http://localhost:3000/api/datasource \
+-H "Content-Type: application/json" \
+-d '{
+  "id": "pg_source",
+  "db_type": "postgres",
+  "connection_url": "postgres://postgres:123@localhost:5432/sse_db",
+  "display_name": "财务部PG库"
+}'
 
-别名处理：
 
-alias_names 在 Postgres 中是 TEXT[] 数组。sqlx 能够自动将其映射为 Rust 的 Vec<String>。这非常适合存储像“分润”、“平台”、“分润系统”这样的多个入口词。
+curl -X POST http://localhost:3000/api/datasource \
+-H "Content-Type: application/json" \
+-d '{
+  "id": "mysql_source",
+  "db_type": "mysql",
+  "connection_url": "mysql://root:root@localhost:3306/indicator_cls",
+  "display_name": "运营部MySQL库"
+}'
 
-串行开发的下一个目标：
 
-现在你可以通过 Postman 或前端发送一个 JSON 到 POST /api/mapping。
+curl -X POST http://localhost:3000/api/mapping \
+-H "Content-Type: application/json" \
+-d '{
+  "entity_key": "finance_platform",
+  "entity_label": "结算平台",
+  "alias_names": ["结算库"],
+  "target_table": "t_finance_detail",
+  "target_column": "platform_name",
+  "source_id": "pg_source"
+}'
 
-下一步，我们将编写 src/api/chat.rs。这个接口将接收用户的提问（如“分润平台是什么”），调用 fst.read().await 进行匹配，并根据映射表里的物理表名、列名，拼装出最终的 SQL。
 
-fst_engine.rs
-
-这是我们的“语义大脑”。它会将数据库里的映射加载到内存，实现极速匹配。
-
-mapping.rs
-
-这一部分是整个“管理平面”的核心。它的职责是：接收前端传来的物理-语义绑定关系，保存到数据库，并触发内存中 FST 引擎的实时重构。
+curl -X POST http://localhost:3000/api/mapping \
+-H "Content-Type: application/json" \
+-d '{
+  "entity_key": "op_platform",
+  "entity_label": "运营平台",
+  "alias_names": ["运营库"],
+  "target_table": "t_operation_revenue",
+  "target_column": "corp_name",
+  "source_id": "mysql_source"
+}'
