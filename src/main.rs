@@ -76,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/mappings", get(list_mappings))
         .route("/api/mapping", post(save_mapping))
         .route("/api/datasource", post(register_data_source))
+        .route("/api/datasources", get(api::mapping::list_data_sources))
         
         // --- 问数对话核心接口 (业务端) ---
         .route("/api/chat", post(chat_query))

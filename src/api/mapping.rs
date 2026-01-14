@@ -116,3 +116,18 @@ pub async fn register_data_source(
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
+
+pub async fn list_data_sources(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let rows = sqlx::query_as::<_, crate::models::schema::DataSource>(
+        "SELECT id, db_type, connection_url, display_name FROM data_sources"
+    )
+    .fetch_all(&state.db)
+    .await;
+
+    match rows {
+        Ok(list) => Json(list).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
