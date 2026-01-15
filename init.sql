@@ -1,13 +1,3 @@
-CREATE TABLE semantic_mappings (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    entity_key VARCHAR(100) NOT NULL UNIQUE,  -- 语义 ID: profit_platform
-    entity_label VARCHAR(100) NOT NULL,       -- 中文名: 分润平台
-    alias_names TEXT[] NOT NULL,              -- 别名: ["分润", "平台"]
-    target_table VARCHAR(100) NOT NULL,       -- 物理表: t_revenue
-    target_column VARCHAR(100) NOT NULL,      -- 物理列: platform_name
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
 -- 创建测试物理表
 CREATE TABLE t_revenue_data (
     id SERIAL PRIMARY KEY,
@@ -30,5 +20,40 @@ CREATE TABLE data_sources (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 2. 修改映射表，关联数据源
-ALTER TABLE semantic_mappings ADD COLUMN source_id VARCHAR(50) REFERENCES data_sources(id);
+
+-- 1. 语义节点表 (维度/指标/物理表)
+CREATE TABLE ontology_nodes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    node_key VARCHAR(100) UNIQUE NOT NULL,
+    label VARCHAR(100) NOT NULL,
+    node_type VARCHAR(20) NOT NULL CHECK (node_type IN ('METRIC', 'DIMENSION')),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- 2. 语义定义与物理绑定 (前台配置核心)
+CREATE TABLE semantic_definitions (
+    node_id UUID REFERENCES ontology_nodes(id) ON DELETE CASCADE,
+    source_id VARCHAR(50) NOT NULL,
+    target_table VARCHAR(100) NOT NULL,
+    target_column VARCHAR(100) NOT NULL,
+    -- 核心：动态业务约束 (JSONB)
+    -- 存储格式: [{"column": "status", "operator": "=", "value": "SUCCESS"}]
+    default_constraints JSONB DEFAULT '[]',
+    alias_names TEXT[] NOT NULL,
+    PRIMARY KEY (node_id)
+);
+
+-- 3. 别名表 (用于 FST 索引)
+CREATE TABLE node_aliases (
+    id SERIAL PRIMARY KEY,
+    node_id UUID REFERENCES ontology_nodes(id) ON DELETE CASCADE,
+    alias_name VARCHAR(100) NOT NULL
+);
+
+-- 4. 本体关系表 (用于自动推理 JOIN 路径)
+CREATE TABLE ontology_relations (
+    id SERIAL PRIMARY KEY,
+    from_node_id UUID REFERENCES ontology_nodes(id),
+    to_node_id UUID REFERENCES ontology_nodes(id),
+    join_logic TEXT NOT NULL -- 如: "a.platform_id = b.id"
+);
