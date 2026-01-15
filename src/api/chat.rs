@@ -1,5 +1,5 @@
 use axum::{extract::State, response::IntoResponse, Json};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::sync::Arc;
 use crate::ax_state::AppState;
 use crate::models::context::ChatRequest;
@@ -13,36 +13,36 @@ pub async fn chat_query(State(state): State<Arc<AppState>>, Json(payload): Json<
     let query_text = payload.query.trim();
     let fst = state.fst.read().await;
 
-    // --- 1. 语义识别阶段 ---
-    let mut target_metric: Option<FullSemanticNode> = None;
+    // --- 1. 语义识别阶段 (FST + A-Box Search) ---
+    let mut target_metrics: Vec<FullSemanticNode> = Vec::new();
     let mut detected_filters: Vec<(FullSemanticNode, String)> = Vec::new();
 
+    // A. 时间正则捕获
     let date_regex = Regex::new(r"(\d{4}-\d{2}-\d{2})").unwrap();
     let captured_date = date_regex.captures(query_text).map(|cap| cap[1].to_string());
 
     for entry in fst.node_cache.iter() {
         let n = entry.value();
         
+        // 识别指标名 (主名 + 别名)
         if n.node_role == "METRIC" && (query_text.contains(&n.label) || n.alias_names.iter().any(|a| query_text.contains(a))) {
-            target_metric = Some(n.clone());
+            target_metrics.push(n.clone());
         }
         
+        // 识别维度与实例值
         if n.node_role == "DIMENSION" {
-            let is_time_dim = n.node_key.to_lowercase().contains("date") 
-                             || n.node_key.to_lowercase().contains("dt") 
-                             || n.label.contains("日期") 
-                             || n.label.contains("时间");
-            
-            if is_time_dim && captured_date.is_some() {
+            // 时间维度自动映射逻辑
+            let is_time = n.node_key.to_lowercase().contains("date") || n.label.contains("时间") || n.label.contains("日期");
+            if is_time && captured_date.is_some() {
                 detected_filters.push((n.clone(), captured_date.clone().unwrap()));
             }
 
-            let rows = sqlx::query("SELECT value_label, value_code FROM dimension_values WHERE dimension_node_id = $1")
+            // 搜索 A-Box 实例库
+            let instances = sqlx::query("SELECT value_label, value_code FROM dimension_values WHERE dimension_node_id = $1")
                 .bind(n.id).fetch_all(&state.db).await.unwrap_or_default();
-            
-            for row in rows {
-                let label: String = row.get("value_label");
-                let code: String = row.get("value_code");
+            for inst in instances {
+                let label: String = inst.get("value_label");
+                let code: String = inst.get("value_code");
                 if query_text.contains(&label) {
                     detected_filters.push((n.clone(), code));
                 }
@@ -50,75 +50,95 @@ pub async fn chat_query(State(state): State<Arc<AppState>>, Json(payload): Json<
         }
     }
 
-    // --- 2. 意图合法性校验 ---
-    let metric = match target_metric {
-        Some(m) => m,
-        None => return Json(json!({"status": "fail", "answer": "抱歉，未识别出您要查询的指标名称。"})).into_response()
-    };
+    // --- 2. 冲突处理与意图对齐 ---
+    if target_metrics.is_empty() {
+        return Json(json!({"status": "fail", "answer": "未识别到指标，请尝试输入具体指标名称（如：收益额）。"})).into_response();
+    }
+    if target_metrics.len() > 1 {
+        return Json(json!({
+            "status": "ambiguous", 
+            "answer": "发现多个相似指标，请确认您的意图", 
+            "candidates": target_metrics.iter().map(|n| n.label.clone()).collect::<Vec<_>>()
+        })).into_response();
+    }
 
+    let metric = &target_metrics[0];
+
+    // --- 3. 语义连通性验证 (T-Box Check) ---
     for (dim, _) in &detected_filters {
-        let is_valid = sqlx::query(
-            "SELECT 1 FROM metric_dimension_rels WHERE metric_node_id = $1 AND dimension_node_id = $2"
-        ).bind(metric.id).bind(dim.id).fetch_optional(&state.db).await.unwrap_or(None);
-
+        let is_valid = sqlx::query("SELECT 1 FROM metric_dimension_rels WHERE metric_node_id = $1 AND dimension_node_id = $2")
+            .bind(metric.id).bind(dim.id).fetch_optional(&state.db).await.unwrap_or(None);
         if is_valid.is_none() {
             return Json(json!({
                 "status": "ambiguous",
-                "answer": format!("语义冲突：指标 '{}' 不支持按维度 '{}' 进行分析。", metric.label, dim.label)
+                "answer": format!("业务语义警告：指标 '{}' 并不支持按 '{}' 维度分析，查询结果可能无意义。", metric.label, dim.label)
             })).into_response();
         }
     }
 
-    // --- 3. 动态 SQL 生成 ---
-    // 修复点：使用配置好的默认聚合方式 (default_agg)
-    let select_clause = if query_text.contains("平均") {
-        format!("AVG({})", metric.target_column)
+    // --- 4. 逻辑计划 -> 物理 SQL 组装 ---
+    // 识别提问中的显式聚合意图，否则使用本体定义的默认值
+    let agg = if query_text.contains("平均") { 
+        "AVG" 
     } else if metric.default_agg == "NONE" {
-        metric.target_column.clone()
+        "NONE"
     } else {
-        format!("{}({})", metric.default_agg, metric.target_column)
+        &metric.default_agg
+    };
+
+    let select_clause = if agg == "NONE" { 
+        metric.target_column.clone() 
+    } else { 
+        format!("{}({})", agg, metric.target_column) 
     };
 
     let mut where_conds = vec!["1=1".to_string()];
-    for (dim_node, val_code) in &detected_filters {
-        where_conds.push(format!("{} = '{}'", dim_node.target_column, val_code));
+    
+    // 合并识别到的物理过滤值
+    for (dim_node, val) in &detected_filters {
+        where_conds.push(format!("{} = '{}'", dim_node.target_column, val));
     }
 
-    // 注入隐含约束：指标 + 维度
-    for c in &metric.default_constraints.0 {
-        where_conds.push(format!("{} {} '{}'", c.column, c.operator, c.value));
+    // 注入隐含业务约束：合并 [指标层] + [所有匹配到的维度层]
+    for c in &metric.default_constraints.0 { 
+        where_conds.push(format!("{} {} '{}'", c.column, c.operator, c.value)); 
     }
-    for (dim_node, _) in &detected_filters {
-        for c in &dim_node.default_constraints.0 {
-            where_conds.push(format!("{} {} '{}'", c.column, c.operator, c.value));
+    for (dim, _) in &detected_filters {
+        for c in &dim.default_constraints.0 { 
+            where_conds.push(format!("{} {} '{}'", c.column, c.operator, c.value)); 
         }
     }
 
     let sql = format!("SELECT {} as value FROM {} WHERE {}", select_clause, metric.target_table, where_conds.join(" AND "));
 
-    // --- 4. 执行数据路由 ---
-    let source: DataSource = sqlx::query_as("SELECT * FROM data_sources WHERE id = $1").bind(&metric.source_id).fetch_one(&state.db).await.unwrap();
+    // --- 5. 跨库路由与执行 ---
+    let source_res: Result<DataSource, _> = sqlx::query_as("SELECT * FROM data_sources WHERE id = $1")
+        .bind(&metric.source_id).fetch_one(&state.db).await;
+    
+    let source = match source_res {
+        Ok(s) => s,
+        Err(_) => return Json(json!({"status": "error", "message": "无法找到映射的数据源"})).into_response(),
+    };
+
     let pool = state.pool_manager.get_or_create_pool(&source).await.unwrap();
 
     match &*pool {
         DynamicPool::Postgres(p) => {
             let rows = sqlx::query(&sql).fetch_all(p).await.unwrap_or_default();
-            let data: Vec<Value> = rows.iter().map(pg_row_to_json).collect();
             Json(json!({
                 "status": "success", 
                 "sql": sql, 
-                "logic": metric.default_agg, 
-                "data": data
+                "logic": format!("基于{}聚合", agg),
+                "data": rows.iter().map(pg_row_to_json).collect::<Vec<serde_json::Value>>()
             })).into_response()
         },
         DynamicPool::MySql(p) => {
             let rows = sqlx::query(&sql.replace("$1", "?")).fetch_all(p).await.unwrap_or_default();
-            let data: Vec<Value> = rows.iter().map(mysql_row_to_json).collect();
             Json(json!({
                 "status": "success", 
-                "sql": sql, 
-                "logic": metric.default_agg, 
-                "data": data
+                "sql": sql.replace("$1", "?"), 
+                "logic": format!("基于{}聚合", agg),
+                "data": rows.iter().map(mysql_row_to_json).collect::<Vec<serde_json::Value>>()
             })).into_response()
         }
     }

@@ -68,3 +68,29 @@ CREATE TABLE ontology_relations (
     to_table VARCHAR(100),
     join_logic TEXT NOT NULL
 );
+
+
+-- 1. 业务域：顶级分类（如：财务、运营）
+CREATE TABLE semantic_domains (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    domain_key VARCHAR(100) UNIQUE NOT NULL,
+    label VARCHAR(100) NOT NULL,
+    description TEXT
+);
+
+-- 2. 逻辑数据集：定义一组可以互相关联的物理表
+CREATE TABLE semantic_datasets (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    domain_id UUID REFERENCES semantic_domains(id) ON DELETE CASCADE,
+    dataset_key VARCHAR(100) UNIQUE NOT NULL,
+    label VARCHAR(100) NOT NULL,
+    -- 核心：存储该数据集的默认 JOIN 全图配置 (JSON)
+    -- 例如：{"platform_dim": {"join_type": "LEFT", "on": "f_order.pid = platform_dim.id"}}
+    join_config JSONB DEFAULT '{}' 
+);
+
+-- 3. 修改本体节点：关联到数据集
+ALTER TABLE ontology_nodes ADD COLUMN dataset_id UUID REFERENCES semantic_datasets(id);
+
+-- 4. 增加维度值索引标志（用于控制是否进入 FST 模糊搜索）
+ALTER TABLE semantic_definitions ADD COLUMN is_searchable BOOLEAN DEFAULT TRUE;

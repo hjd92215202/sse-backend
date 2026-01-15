@@ -14,15 +14,28 @@ pub struct FullSemanticNode {
     pub id: Uuid,
     pub node_key: String,
     pub label: String,
-    pub node_role: String,
+    pub node_role: String, // METRIC / DIMENSION
     pub source_id: String,
     pub target_table: String,
     pub target_column: String,
     pub default_constraints: sqlx::types::Json<Vec<BusinessConstraint>>,
     pub alias_names: Vec<String>,
+    pub default_agg: String,
     #[sqlx(default)]
     pub supported_dimension_ids: Vec<Uuid>,
-    pub default_agg: String, // 新增：SUM, AVG, MIN, MAX, NONE
+    pub dataset_id: Option<Uuid>,
+}
+
+/// 吸收自 SuperSonic 的逻辑查询计划中间表达
+/// 目前在推理机中直接生成 SQL，但在多表关联阶段将由该结构体承载推理状态
+#[allow(dead_code)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct QueryLogicalPlan {
+    pub metric: FullSemanticNode,
+    pub dimensions: Vec<(FullSemanticNode, String)>,
+    pub implicit_filters: Vec<String>,
+    pub final_agg: String,
+    pub dataset_context: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,6 +50,7 @@ pub struct CreateNodeRequest {
     pub default_constraints: Vec<BusinessConstraint>,
     pub supported_dimension_ids: Vec<Uuid>,
     pub default_agg: String,
+    pub dataset_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
@@ -59,4 +73,23 @@ pub struct CreateDataSourceRequest {
 pub struct MetadataRequest {
     pub source_id: String,
     pub table_name: Option<String>,
+}
+
+/// 企业级语义网：业务域定义
+#[allow(dead_code)]
+#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
+pub struct Domain {
+    pub id: Uuid,
+    pub domain_key: String,
+    pub label: String,
+}
+
+/// 企业级语义网：逻辑数据集定义
+#[allow(dead_code)]
+#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
+pub struct Dataset {
+    pub id: Uuid,
+    pub domain_id: Uuid,
+    pub label: String,
+    pub join_config: sqlx::types::Json<serde_json::Value>,
 }
