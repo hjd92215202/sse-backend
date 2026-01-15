@@ -51,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/api/mappings", get(list_mappings))
         .route("/api/mapping", post(save_mapping))
+        .route("/api/ontology/export", get(crate::api::mapping::export_ontology_ttl))
         .route("/api/datasource", post(register_data_source))
         .route("/api/datasources", get(list_data_sources)) // 新增接口
         .route("/api/chat", post(chat_query))
