@@ -10,7 +10,6 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 
-// 导入所有业务接口
 use crate::api::chat::chat_query;
 use crate::api::mapping::{
     list_mappings, register_data_source, save_mapping, list_data_sources, 
@@ -31,53 +30,80 @@ pub mod ax_state {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // 1. 加载配置与初始化内部数据库
     dotenvy::dotenv().ok();
     let db = infra::db_internal::init_db().await;
 
-    // 初始化加载 FST 索引
-    let mappings = sqlx::query_as::<_, FullSemanticNode>(
-        "SELECT n.id, n.node_key, n.label, n.node_role, d.source_id, d.target_table, d.target_column, d.default_constraints, d.alias_names 
-         FROM ontology_nodes n JOIN semantic_definitions d ON n.id = d.node_id"
+    // 2. 核心：启动时加载全量语义节点 (初始化 FST)
+    // 这里的 SQL 必须与 mapping.rs 中的 list 逻辑保持高度一致
+    let mappings_res = sqlx::query_as::<sqlx::Postgres, FullSemanticNode>(
+        r#"
+        SELECT n.id, n.node_key, n.label, n.node_role, d.source_id, d.target_table, d.target_column, 
+               d.default_constraints, d.alias_names, d.default_agg, n.dataset_id,
+               COALESCE(array_agg(r.dimension_node_id) FILTER (WHERE r.dimension_node_id IS NOT NULL), '{}') as supported_dimension_ids
+        FROM ontology_nodes n 
+        JOIN semantic_definitions d ON n.id = d.node_id
+        LEFT JOIN metric_dimension_rels r ON n.id = r.metric_node_id
+        GROUP BY n.id, n.node_key, n.label, n.node_role, d.source_id, d.target_table, d.target_column, d.default_constraints, d.alias_names, d.default_agg, n.dataset_id
+        "#
     )
     .fetch_all(&db)
-    .await
-    .unwrap_or_default();
+    .await;
 
-    let fst_engine = FstEngine::build(&mappings)?;
+    let nodes = match mappings_res {
+        Ok(n) => {
+            println!("🚀 [Init] 成功加载 {} 个语义节点到内存索引", n.len());
+            n
+        },
+        Err(e) => {
+            eprintln!("❌ [Init] 无法加载语义节点: {:?}. 请检查数据库 schema。", e);
+            Vec::new()
+        }
+    };
+
+    // 3. 构建 FST 引擎
+    let fst_engine = FstEngine::build(&nodes)?;
+    
+    // 4. 初始化全局状态
     let state = Arc::new(ax_state::AppState {
         db,
         fst: RwLock::new(fst_engine),
         pool_manager: PoolManager::new(),
     });
 
-    let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
+    // 5. 配置中间件与路由
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
 
     let app = Router::new()
-        // 本体映射管理
+        // 语义建模接口
         .route("/api/mappings", get(list_mappings))
         .route("/api/mapping", post(save_mapping))
-        .route("/api/ontology/export", get(export_ontology_ttl)) // 注册下载接口
+        .route("/api/ontology/export", get(export_ontology_ttl))
         
-        // 外部元数据探测
+        // 元数据与同步
         .route("/api/metadata/tables", get(get_metadata_tables))
         .route("/api/metadata/columns", get(get_metadata_columns))
-        
-        // A-Box 维度实例同步
         .route("/api/sync-values/{id}", post(sync_dimension_values))
         
         // 数据源管理
         .route("/api/datasource", post(register_data_source))
         .route("/api/datasources", get(list_data_sources))
         
-        // 语义问数对话核心
+        // 问数对话 (核心)
         .route("/api/chat", post(chat_query))
         
         .with_state(state)
         .layer(cors);
 
+    // 6. 启动服务
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
-    println!("🚀 SSE Enterprise Backend 启动: http://{}", addr);
+    println!("🔥 SSE Enterprise Backend is running on http://{}", addr);
+    
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
+    
     Ok(())
 }

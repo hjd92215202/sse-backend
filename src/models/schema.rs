@@ -18,24 +18,15 @@ pub struct FullSemanticNode {
     pub source_id: String,
     pub target_table: String,
     pub target_column: String,
+    // 使用 sqlx::types::Json 包装自定义结构体数组
     pub default_constraints: sqlx::types::Json<Vec<BusinessConstraint>>,
+    // Postgres 的 TEXT[] 对应 Rust 的 Vec<String>
     pub alias_names: Vec<String>,
     pub default_agg: String,
+    // 聚合查询出的维度 ID 列表
     #[sqlx(default)]
     pub supported_dimension_ids: Vec<Uuid>,
     pub dataset_id: Option<Uuid>,
-}
-
-/// 吸收自 SuperSonic 的逻辑查询计划中间表达
-/// 目前在推理机中直接生成 SQL，但在多表关联阶段将由该结构体承载推理状态
-#[allow(dead_code)]
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct QueryLogicalPlan {
-    pub metric: FullSemanticNode,
-    pub dimensions: Vec<(FullSemanticNode, String)>,
-    pub implicit_filters: Vec<String>,
-    pub final_agg: String,
-    pub dataset_context: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,21 +66,14 @@ pub struct MetadataRequest {
     pub table_name: Option<String>,
 }
 
-/// 企业级语义网：业务域定义
+/// 吸收自 SuperSonic 的逻辑查询计划中间表达
+/// 目前在推理机中直接生成 SQL，但在多表关联阶段将由该结构体承载推理状态
 #[allow(dead_code)]
-#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
-pub struct Domain {
-    pub id: Uuid,
-    pub domain_key: String,
-    pub label: String,
-}
-
-/// 企业级语义网：逻辑数据集定义
-#[allow(dead_code)]
-#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
-pub struct Dataset {
-    pub id: Uuid,
-    pub domain_id: Uuid,
-    pub label: String,
-    pub join_config: sqlx::types::Json<serde_json::Value>,
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct QueryLogicalPlan {
+    pub metric: FullSemanticNode,
+    pub dimensions: Vec<(FullSemanticNode, String)>,
+    pub implicit_filters: Vec<String>,
+    pub final_agg: String,
+    pub dataset_context: Option<Uuid>,
 }
