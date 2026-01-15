@@ -14,24 +14,29 @@ pub struct FullSemanticNode {
     pub id: Uuid,
     pub node_key: String,
     pub label: String,
-    pub node_type: String,
+    pub node_role: String,
     pub source_id: String,
     pub target_table: String,
     pub target_column: String,
     pub default_constraints: sqlx::types::Json<Vec<BusinessConstraint>>,
     pub alias_names: Vec<String>,
+    #[sqlx(default)]
+    pub supported_dimension_ids: Vec<Uuid>,
+    pub default_agg: String, // 新增：SUM, AVG, MIN, MAX, NONE
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CreateNodeRequest {
     pub node_key: String,
     pub label: String,
-    pub node_type: String,
+    pub node_role: String,
     pub source_id: String,
     pub target_table: String,
     pub target_column: String,
     pub alias_names: Vec<String>,
     pub default_constraints: Vec<BusinessConstraint>,
+    pub supported_dimension_ids: Vec<Uuid>,
+    pub default_agg: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
@@ -48,4 +53,10 @@ pub struct CreateDataSourceRequest {
     pub db_type: String,
     pub connection_url: String,
     pub display_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MetadataRequest {
+    pub source_id: String,
+    pub table_name: Option<String>,
 }
