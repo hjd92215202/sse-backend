@@ -9,6 +9,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::trace::TraceLayer; 
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt}; 
 
 use crate::api::chat::chat_query;
 use crate::api::mapping::{
@@ -33,6 +35,15 @@ pub mod ax_state {
 async fn main() -> anyhow::Result<()> {
     // 1. 加载配置与初始化内部数据库
     dotenvy::dotenv().ok();
+
+    // --- 1. 初始化 tracing 日志 ---
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "sse_backend=debug,tower_http=debug".into()))
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
+    tracing::info!("🔧 正在初始化 SSE 企业级语义服务器...");
+
     let db = infra::db_internal::init_db().await;
 
     // 2. 核心：启动时加载全量语义节点 (初始化 FST)
@@ -53,11 +64,11 @@ async fn main() -> anyhow::Result<()> {
 
     let nodes = match mappings_res {
         Ok(n) => {
-            println!("🚀 [Init] 成功加载 {} 个语义节点到内存索引", n.len());
+            tracing::info!("✅ [Init] 成功加载 {} 个语义节点到内存索引", n.len());
             n
         },
         Err(e) => {
-            eprintln!("❌ [Init] 无法加载语义节点: {:?}. 请检查数据库 schema。", e);
+            tracing::error!("❌ [Init] 无法加载语义节点: {:?}", e);
             Vec::new()
         }
     };
@@ -98,11 +109,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/chat", post(chat_query))
         
         .with_state(state)
-        .layer(cors);
+        .layer(cors)
+        .layer(TraceLayer::new_for_http());
 
     // 6. 启动服务
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
-    println!("🔥 SSE Enterprise Backend is running on http://{}", addr);
+    tracing::info!("🔥 SSE Enterprise Backend is running on http://{}", addr);
     
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;

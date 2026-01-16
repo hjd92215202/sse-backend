@@ -27,3 +27,8 @@ chrono = { version = "0.4.42", features = ["serde"] }
 rust_decimal = { version = "1.39.0", features = ["serde-float"] }
 petgraph = "0.8.3"
 regex = "1.12.2"
+
+jieba-rs = "0.8.1"  
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] } # 用于控制日志格式和级别
