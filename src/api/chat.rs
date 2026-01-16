@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 // 导入项目内部组件
 use crate::ax_state::AppState;
-use crate::core::inference::SemanticInferenceEngine;
 use crate::infra::db_external::DynamicPool;
 use crate::infra::db_internal::{mysql_row_to_json, pg_row_to_json};
 use crate::models::context::ChatRequest;
@@ -20,7 +19,7 @@ pub async fn chat_query(
     let query_text = payload.query.trim();
 
     // 1. 初始化语义推理引擎 (内部封装了分词、FST 匹配、A-Box 识别和 T-Box 冲突消歧)
-    let engine = SemanticInferenceEngine::new();
+    let engine = state.engine.read().await;
 
     // 2. 执行语义推理
     // 该过程会自动解决：同名维度在不同表的问题、日期捕获逻辑、码值反推维度类逻辑

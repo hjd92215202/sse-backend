@@ -110,7 +110,7 @@ pub async fn save_mapping(
     info!("建模请求处理完成: node_id={}", node_id);
 
     // 热刷新内存中的语义索引
-    let _ = refresh_fst_cache(&state).await;
+    let _ = full_reload_semantic_engine(&state).await;
 
     (StatusCode::OK, Json(serde_json::json!({ "id": node_id }))).into_response()
 }
@@ -251,6 +251,8 @@ pub async fn sync_dimension_values(
             .execute(&state.db).await;
     }
     info!("A-Box 同步完成，新增/更新 {} 个实例", count);
+
+    let _ = full_reload_semantic_engine(&state).await;
     (StatusCode::OK, "A-Box Synced Successfully").into_response()
 }
 
@@ -351,5 +353,34 @@ async fn refresh_fst_cache(state: &AppState) -> anyhow::Result<()> {
     let mut guard = state.fst.write().await;
     *guard = FstEngine::build(&nodes)?;
     info!("内存语义索引 FST 已热刷新");
+    Ok(())
+}
+
+async fn full_reload_semantic_engine(state: &AppState) -> anyhow::Result<()> {
+    let nodes = sqlx::query_as::<Postgres, FullSemanticNode>(
+        "SELECT n.id, n.node_key, n.label, n.node_role, d.source_id, d.target_table, d.sql_expression, d.default_constraints, d.alias_names, d.default_agg, n.dataset_id, 
+        '{}'::uuid[] as supported_dimension_ids FROM ontology_nodes n JOIN semantic_definitions d ON n.id = d.node_id"
+    ).fetch_all(&state.db).await?;
+
+    // 1. 刷新 FST
+    {
+        let mut fst_guard = state.fst.write().await;
+        *fst_guard = FstEngine::build(&nodes)?;
+    }
+
+    // 2. 刷新 Jieba
+    {
+        let mut engine_guard = state.engine.write().await;
+        let mut words = nodes.iter().flat_map(|n| {
+            let mut v = vec![n.label.clone()];
+            v.extend(n.alias_names.clone());
+            v
+        }).collect::<Vec<String>>();
+        
+        let codes = sqlx::query("SELECT value_label FROM dimension_values").fetch_all(&state.db).await?;
+        words.extend(codes.into_iter().map(|r| r.get::<String, _>(0)));
+        
+        engine_guard.refresh_custom_words(words);
+    }
     Ok(())
 }

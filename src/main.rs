@@ -12,6 +12,8 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer; 
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt}; 
 
+use sqlx::Row;
+
 use crate::api::chat::chat_query;
 use crate::api::mapping::{
     list_mappings, register_data_source, save_mapping, list_data_sources, 
@@ -19,6 +21,7 @@ use crate::api::mapping::{
     delete_mapping
 };
 use crate::core::fst_engine::FstEngine;
+use crate::core::inference::SemanticInferenceEngine;
 use crate::infra::db_external::PoolManager;
 use crate::models::schema::FullSemanticNode;
 
@@ -28,6 +31,7 @@ pub mod ax_state {
         pub db: sqlx::PgPool,
         pub fst: RwLock<FstEngine>,
         pub pool_manager: PoolManager,
+        pub engine: RwLock<SemanticInferenceEngine>, // 【核心】将推理引擎单例化
     }
 }
 
@@ -75,12 +79,29 @@ async fn main() -> anyhow::Result<()> {
 
     // 3. 构建 FST 引擎
     let fst_engine = FstEngine::build(&nodes)?;
+
+    // 初始化推理引擎并同步业务词典
+    let mut inference_engine = SemanticInferenceEngine::new();
+    
+    // 提取所有可能的业务词汇（标签、别名、码值）
+    let mut words = nodes.iter().flat_map(|n| {
+        let mut v = vec![n.label.clone()];
+        v.extend(n.alias_names.clone());
+        v
+    }).collect::<Vec<String>>();
+
+    // 提取 A-Box 码值
+    let codes = sqlx::query("SELECT value_label FROM dimension_values").fetch_all(&db).await?;
+    words.extend(codes.into_iter().map(|r| r.get::<String, _>(0)));
+    
+    inference_engine.refresh_custom_words(words);
     
     // 4. 初始化全局状态
     let state = Arc::new(ax_state::AppState {
         db,
         fst: RwLock::new(fst_engine),
         pool_manager: PoolManager::new(),
+        engine: RwLock::new(inference_engine),
     });
 
     // 5. 配置中间件与路由
