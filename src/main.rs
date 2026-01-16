@@ -4,7 +4,7 @@ mod infra;
 mod models;
 mod service;
 
-use axum::{routing::{get, post}, Router};
+use axum::{routing::{get, post,delete}, Router};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -13,7 +13,8 @@ use tower_http::cors::{Any, CorsLayer};
 use crate::api::chat::chat_query;
 use crate::api::mapping::{
     list_mappings, register_data_source, save_mapping, list_data_sources, 
-    get_metadata_tables, get_metadata_columns, sync_dimension_values, export_ontology_ttl
+    get_metadata_tables, get_metadata_columns, sync_dimension_values, export_ontology_ttl,
+    delete_mapping
 };
 use crate::core::fst_engine::FstEngine;
 use crate::infra::db_external::PoolManager;
@@ -38,13 +39,13 @@ async fn main() -> anyhow::Result<()> {
     // 这里的 SQL 必须与 mapping.rs 中的 list 逻辑保持高度一致
     let mappings_res = sqlx::query_as::<sqlx::Postgres, FullSemanticNode>(
         r#"
-        SELECT n.id, n.node_key, n.label, n.node_role, d.source_id, d.target_table, d.target_column, 
+        SELECT n.id, n.node_key, n.label, n.node_role, d.source_id, d.target_table, d.sql_expression, 
                d.default_constraints, d.alias_names, d.default_agg, n.dataset_id,
                COALESCE(array_agg(r.dimension_node_id) FILTER (WHERE r.dimension_node_id IS NOT NULL), '{}') as supported_dimension_ids
         FROM ontology_nodes n 
         JOIN semantic_definitions d ON n.id = d.node_id
         LEFT JOIN metric_dimension_rels r ON n.id = r.metric_node_id
-        GROUP BY n.id, n.node_key, n.label, n.node_role, d.source_id, d.target_table, d.target_column, d.default_constraints, d.alias_names, d.default_agg, n.dataset_id
+        GROUP BY n.id, n.node_key, n.label, n.node_role, d.source_id, d.target_table, d.sql_expression, d.default_constraints, d.alias_names, d.default_agg, n.dataset_id
         "#
     )
     .fetch_all(&db)
@@ -81,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
         // 语义建模接口
         .route("/api/mappings", get(list_mappings))
         .route("/api/mapping", post(save_mapping))
+        .route("/api/mapping/{id}", delete(delete_mapping))
         .route("/api/ontology/export", get(export_ontology_ttl))
         
         // 元数据与同步

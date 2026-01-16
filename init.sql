@@ -94,3 +94,6 @@ ALTER TABLE ontology_nodes ADD COLUMN dataset_id UUID REFERENCES semantic_datase
 
 -- 4. 增加维度值索引标志（用于控制是否进入 FST 模糊搜索）
 ALTER TABLE semantic_definitions ADD COLUMN is_searchable BOOLEAN DEFAULT TRUE;
+
+ALTER TABLE semantic_definitions RENAME COLUMN target_column TO sql_expression;
+-- 备注：sql_expression 现在可以填 "platform_name" 也可以填 "CASE WHEN type=1 THEN 'A' ELSE 'B' END"

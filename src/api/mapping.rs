@@ -13,9 +13,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 use sqlx::{Row, Postgres};
 
-// --- 1. 本体建模核心接口 ---
-
-/// 保存/更新本体节点 (包含 T-Box 关系维护)
+// 保存本体节点及 RDF 指标-维度关系
 pub async fn save_mapping(State(state): State<Arc<AppState>>, Json(payload): Json<CreateNodeRequest>) -> impl IntoResponse {
     let mut tx = match state.db.begin().await {
         Ok(t) => t,
@@ -43,13 +41,13 @@ pub async fn save_mapping(State(state): State<Arc<AppState>>, Json(payload): Jso
     let constraints_json = serde_json::to_value(&payload.default_constraints).unwrap();
     let def_res = sqlx::query(
         r#"
-        INSERT INTO semantic_definitions (node_id, source_id, target_table, target_column, default_constraints, alias_names, default_agg)
+        INSERT INTO semantic_definitions (node_id, source_id, target_table, sql_expression, default_constraints, alias_names, default_agg)
         VALUES ($1, $2, $3, $4, $5, $6, $7) 
         ON CONFLICT (node_id) 
         DO UPDATE SET 
             source_id = EXCLUDED.source_id, 
             target_table = EXCLUDED.target_table, 
-            target_column = EXCLUDED.target_column, 
+            sql_expression = EXCLUDED.sql_expression, 
             default_constraints = EXCLUDED.default_constraints, 
             alias_names = EXCLUDED.alias_names, 
             default_agg = EXCLUDED.default_agg
@@ -58,7 +56,7 @@ pub async fn save_mapping(State(state): State<Arc<AppState>>, Json(payload): Jso
     .bind(node_id)
     .bind(&payload.source_id)
     .bind(&payload.target_table)
-    .bind(&payload.target_column)
+    .bind(&payload.sql_expression)
     .bind(constraints_json)
     .bind(&payload.alias_names)
     .bind(&payload.default_agg)
@@ -68,7 +66,7 @@ pub async fn save_mapping(State(state): State<Arc<AppState>>, Json(payload): Jso
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("Definition Table Error: {}", e)).into_response();
     }
 
-    // C. 更新 T-Box 语义关联 (指标关联哪些维度有效)
+    // C. 更新 T-Box 语义关联
     let _ = sqlx::query("DELETE FROM metric_dimension_rels WHERE metric_node_id = $1")
         .bind(node_id)
         .execute(&mut *tx).await;
@@ -92,17 +90,16 @@ pub async fn save_mapping(State(state): State<Arc<AppState>>, Json(payload): Jso
     (StatusCode::OK, Json(serde_json::json!({ "id": node_id }))).into_response()
 }
 
-/// 列表展示 (聚合 T-Box 维度关联)
 pub async fn list_mappings(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let rows = sqlx::query_as::<Postgres, FullSemanticNode>(
         r#"
-        SELECT n.id, n.node_key, n.label, n.node_role, d.source_id, d.target_table, d.target_column, 
+        SELECT n.id, n.node_key, n.label, n.node_role, d.source_id, d.target_table, d.sql_expression, 
                d.default_constraints, d.alias_names, d.default_agg, n.dataset_id,
                COALESCE(array_agg(r.dimension_node_id) FILTER (WHERE r.dimension_node_id IS NOT NULL), '{}') as supported_dimension_ids
         FROM ontology_nodes n 
         JOIN semantic_definitions d ON n.id = d.node_id
         LEFT JOIN metric_dimension_rels r ON n.id = r.metric_node_id
-        GROUP BY n.id, n.node_key, n.label, n.node_role, d.source_id, d.target_table, d.target_column, d.default_constraints, d.alias_names, d.default_agg, n.dataset_id
+        GROUP BY n.id, n.node_key, n.label, n.node_role, d.source_id, d.target_table, d.sql_expression, d.default_constraints, d.alias_names, d.default_agg, n.dataset_id
         "#
     ).fetch_all(&state.db).await;
 
@@ -112,13 +109,8 @@ pub async fn list_mappings(State(state): State<Arc<AppState>>) -> impl IntoRespo
     }
 }
 
-// --- 2. 元数据探测与 A-Box 同步 ---
-
 pub async fn get_metadata_tables(State(state): State<Arc<AppState>>, Query(req): Query<MetadataRequest>) -> impl IntoResponse {
-    let source = sqlx::query_as::<Postgres, DataSource>("SELECT * FROM data_sources WHERE id = $1")
-        .bind(&req.source_id)
-        .fetch_one(&state.db).await;
-        
+    let source = sqlx::query_as::<Postgres, DataSource>("SELECT * FROM data_sources WHERE id = $1").bind(&req.source_id).fetch_one(&state.db).await;
     match source {
         Ok(s) => Json(state.pool_manager.list_tables(&s).await.unwrap_or_default()).into_response(),
         Err(_) => (StatusCode::NOT_FOUND, "Source not found").into_response(),
@@ -126,10 +118,7 @@ pub async fn get_metadata_tables(State(state): State<Arc<AppState>>, Query(req):
 }
 
 pub async fn get_metadata_columns(State(state): State<Arc<AppState>>, Query(req): Query<MetadataRequest>) -> impl IntoResponse {
-    let source = sqlx::query_as::<Postgres, DataSource>("SELECT * FROM data_sources WHERE id = $1")
-        .bind(&req.source_id)
-        .fetch_one(&state.db).await;
-
+    let source = sqlx::query_as::<Postgres, DataSource>("SELECT * FROM data_sources WHERE id = $1").bind(&req.source_id).fetch_one(&state.db).await;
     match source {
         Ok(s) => Json(state.pool_manager.list_columns(&s, &req.table_name.unwrap_or_default()).await.unwrap_or_default()).into_response(),
         Err(_) => (StatusCode::NOT_FOUND, "Source not found").into_response(),
@@ -137,7 +126,7 @@ pub async fn get_metadata_columns(State(state): State<Arc<AppState>>, Query(req)
 }
 
 pub async fn sync_dimension_values(State(state): State<Arc<AppState>>, Path(node_id): Path<Uuid>) -> impl IntoResponse {
-    let row = sqlx::query("SELECT d.source_id, d.target_table, d.target_column FROM semantic_definitions d WHERE d.node_id = $1")
+    let row = sqlx::query("SELECT d.source_id, d.target_table, d.sql_expression FROM semantic_definitions d WHERE d.node_id = $1")
         .bind(node_id)
         .fetch_one(&state.db).await;
 
@@ -148,24 +137,21 @@ pub async fn sync_dimension_values(State(state): State<Arc<AppState>>, Path(node
 
     let source_id: String = info.get("source_id");
     let target_table: String = info.get("target_table");
-    let target_column: String = info.get("target_column");
+    let sql_expression: String = info.get("sql_expression");
 
-    let source = sqlx::query_as::<Postgres, DataSource>("SELECT * FROM data_sources WHERE id = $1")
-        .bind(&source_id)
-        .fetch_one(&state.db).await.unwrap();
-
+    let source = sqlx::query_as::<Postgres, DataSource>("SELECT * FROM data_sources WHERE id = $1").bind(&source_id).fetch_one(&state.db).await.unwrap();
     let pool = state.pool_manager.get_or_create_pool(&source).await.unwrap();
     
-    // 执行去重查询 (A-Box 抓取)
-    let sql = format!("SELECT DISTINCT {}::text as val FROM {}", target_column, target_table);
+    let sql = format!("SELECT DISTINCT ({}) :: text as v FROM {}", sql_expression, target_table);
     let vals = match &*pool {
         crate::infra::db_external::DynamicPool::Postgres(p) => {
-            sqlx::query(&sql).fetch_all(p).await.unwrap().into_iter().filter_map(|r| r.try_get::<String, _>("val").ok()).collect::<Vec<_>>()
+            sqlx::query(&sql).fetch_all(p).await.unwrap().into_iter().filter_map(|r| r.try_get::<String, _>("v").ok()).collect::<Vec<_>>()
         }
         _ => vec![]
     };
 
     for v in vals {
+        // 【修复点】：改用 query 替代 query! 宏，解决参数解析报错
         let _ = sqlx::query("INSERT INTO dimension_values (dimension_node_id, value_label, value_code) VALUES ($1, $2, $2) ON CONFLICT DO NOTHING")
             .bind(node_id)
             .bind(v)
@@ -174,17 +160,13 @@ pub async fn sync_dimension_values(State(state): State<Arc<AppState>>, Path(node
     (StatusCode::OK, "Sync Complete").into_response()
 }
 
-// --- 3. 语义导出与基础服务 ---
-
 pub async fn export_ontology_ttl(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let nodes = sqlx::query_as::<Postgres, FullSemanticNode>(
-        "SELECT n.id, n.node_key, n.label, n.node_role, d.source_id, d.target_table, d.target_column, 
+        "SELECT n.id, n.node_key, n.label, n.node_role, d.source_id, d.target_table, d.sql_expression, 
                 d.default_constraints, d.alias_names, d.default_agg, n.dataset_id,
          COALESCE(array_agg(r.dimension_node_id) FILTER (WHERE r.dimension_node_id IS NOT NULL), '{}') as supported_dimension_ids
-         FROM ontology_nodes n 
-         JOIN semantic_definitions d ON n.id = d.node_id 
-         LEFT JOIN metric_dimension_rels r ON n.id = r.metric_node_id
-         GROUP BY n.id, n.node_key, n.label, n.node_role, d.source_id, d.target_table, d.target_column, d.default_constraints, d.alias_names, d.default_agg, n.dataset_id"
+         FROM ontology_nodes n JOIN semantic_definitions d ON n.id = d.node_id LEFT JOIN metric_dimension_rels r ON n.id = r.metric_node_id
+         GROUP BY n.id, n.node_key, n.label, n.node_role, d.source_id, d.target_table, d.sql_expression, d.default_constraints, d.alias_names, d.default_agg, n.dataset_id"
     ).fetch_all(&state.db).await.unwrap_or_default();
 
     let id_to_key_map: std::collections::HashMap<Uuid, String> = nodes.iter().map(|n| (n.id, n.node_key.clone())).collect();
@@ -192,7 +174,7 @@ pub async fn export_ontology_ttl(State(state): State<Arc<AppState>>) -> impl Int
 
     for n in nodes {
         let uri = format!("sse:{}", n.node_key);
-        ttl.push_str(&format!("{} rdf:type sse:{} ;\n    sse:label \"{}\" ;\n    sse:table \"{}\" ;\n", uri, n.node_role, n.label, n.target_table));
+        ttl.push_str(&format!("{} rdf:type sse:{} ;\n    sse:label \"{}\" ;\n    sse:expression \"{}\" ;\n", uri, n.node_role, n.label, n.sql_expression));
         if n.node_role == "METRIC" {
             for dim_id in &n.supported_dimension_ids {
                 if let Some(key) = id_to_key_map.get(dim_id) {
@@ -205,24 +187,13 @@ pub async fn export_ontology_ttl(State(state): State<Arc<AppState>>) -> impl Int
     Response::builder().header(header::CONTENT_TYPE, "text/turtle").body(axum::body::Body::from(ttl)).unwrap()
 }
 
-pub async fn register_data_source(State(state): State<Arc<AppState>>, Json(payload): Json<CreateDataSourceRequest>) -> impl IntoResponse {
-    let _ = sqlx::query(
-        "INSERT INTO data_sources (id, db_type, connection_url, display_name) 
-         VALUES ($1, $2, $3, $4) 
-         ON CONFLICT (id) 
-         DO UPDATE SET connection_url=EXCLUDED.connection_url, display_name=EXCLUDED.display_name"
-    )
-    .bind(&payload.id)
-    .bind(&payload.db_type)
-    .bind(&payload.connection_url)
-    .bind(&payload.display_name)
-    .execute(&state.db).await;
-    (StatusCode::CREATED, "Source Registered").into_response()
+pub async fn register_data_source(State(state): State<Arc<AppState>>, Json(p): Json<CreateDataSourceRequest>) -> impl IntoResponse {
+    let _ = sqlx::query("INSERT INTO data_sources (id, db_type, connection_url, display_name) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO UPDATE SET connection_url=EXCLUDED.connection_url, display_name=EXCLUDED.display_name").bind(&p.id).bind(&p.db_type).bind(&p.connection_url).bind(&p.display_name).execute(&state.db).await;
+    StatusCode::CREATED
 }
 
 pub async fn list_data_sources(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let rows = sqlx::query_as::<Postgres, DataSource>("SELECT id, db_type, connection_url, display_name FROM data_sources")
-        .fetch_all(&state.db).await;
+    let rows = sqlx::query_as::<Postgres, DataSource>("SELECT id, db_type, connection_url, display_name FROM data_sources").fetch_all(&state.db).await;
     match rows {
         Ok(list) => Json(list).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -231,14 +202,28 @@ pub async fn list_data_sources(State(state): State<Arc<AppState>>) -> impl IntoR
 
 async fn refresh_fst_cache(state: &AppState) -> anyhow::Result<()> {
     let nodes = sqlx::query_as::<Postgres, FullSemanticNode>(
-        "SELECT n.id, n.node_key, n.label, n.node_role, d.source_id, d.target_table, d.target_column, 
-                d.default_constraints, d.alias_names, d.default_agg, n.dataset_id, 
-                '{}'::uuid[] as supported_dimension_ids 
-         FROM ontology_nodes n 
-         JOIN semantic_definitions d ON n.id = d.node_id"
+        "SELECT n.id, n.node_key, n.label, n.node_role, d.source_id, d.target_table, d.sql_expression, 
+                d.default_constraints, d.alias_names, d.default_agg, n.dataset_id, '{}'::uuid[] as supported_dimension_ids 
+         FROM ontology_nodes n JOIN semantic_definitions d ON n.id = d.node_id"
     ).fetch_all(&state.db).await?;
-    
     let mut guard = state.fst.write().await;
     *guard = FstEngine::build(&nodes)?;
     Ok(())
+}
+
+pub async fn delete_mapping(State(state): State<Arc<AppState>>, Path(id): Path<Uuid>) -> impl IntoResponse {
+    // 由于数据库设有 ON DELETE CASCADE，删除主表即可清理所有关联表
+    let res = sqlx::query("DELETE FROM ontology_nodes WHERE id = $1")
+        .bind(id)
+        .execute(&state.db)
+        .await;
+
+    match res {
+        Ok(_) => {
+            // 必须刷新 FST，否则内存中仍然能匹配到已删除的词
+            let _ = refresh_fst_cache(&state).await;
+            StatusCode::OK.into_response()
+        },
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }

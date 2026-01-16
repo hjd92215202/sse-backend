@@ -17,7 +17,7 @@ pub struct FullSemanticNode {
     pub node_role: String, // METRIC / DIMENSION
     pub source_id: String,
     pub target_table: String,
-    pub target_column: String,
+    pub sql_expression: String,
     // 使用 sqlx::types::Json 包装自定义结构体数组
     pub default_constraints: sqlx::types::Json<Vec<BusinessConstraint>>,
     // Postgres 的 TEXT[] 对应 Rust 的 Vec<String>
@@ -36,7 +36,7 @@ pub struct CreateNodeRequest {
     pub node_role: String,
     pub source_id: String,
     pub target_table: String,
-    pub target_column: String,
+    pub sql_expression: String,
     pub alias_names: Vec<String>,
     pub default_constraints: Vec<BusinessConstraint>,
     pub supported_dimension_ids: Vec<Uuid>,
