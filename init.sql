@@ -97,3 +97,9 @@ ALTER TABLE semantic_definitions ADD COLUMN is_searchable BOOLEAN DEFAULT TRUE;
 
 ALTER TABLE semantic_definitions RENAME COLUMN target_column TO sql_expression;
 -- 备注：sql_expression 现在可以填 "platform_name" 也可以填 "CASE WHEN type=1 THEN 'A' ELSE 'B' END"
+
+-- 1. 扩展本体节点表：增加语义类型（STRING, DATE, NUMBER）
+ALTER TABLE ontology_nodes ADD COLUMN semantic_type VARCHAR(20) DEFAULT 'STRING';
+
+-- 2. 扩展定义表：增加格式化字符串（针对日期）
+ALTER TABLE semantic_definitions ADD COLUMN value_format VARCHAR(50) DEFAULT 'yyyy-MM-dd';

@@ -34,15 +34,16 @@ pub async fn save_mapping(
 
     // A. 更新 ontology_nodes (核心信息)
     let node_id: Uuid = match sqlx::query(
-        "INSERT INTO ontology_nodes (node_key, label, node_role, dataset_id) 
-         VALUES ($1, $2, $3, $4) 
+        "INSERT INTO ontology_nodes (node_key, label, node_role, semantic_type, dataset_id) 
+         VALUES ($1, $2, $3, $4, $5) 
          ON CONFLICT (node_key) 
-         DO UPDATE SET label = EXCLUDED.label, node_role = EXCLUDED.node_role, dataset_id = EXCLUDED.dataset_id 
+         DO UPDATE SET label = EXCLUDED.label, node_role = EXCLUDED.node_role, semantic_type=EXCLUDED.semantic_type, dataset_id = EXCLUDED.dataset_id 
          RETURNING id"
     )
     .bind(&payload.node_key)
     .bind(&payload.label)
     .bind(&payload.node_role)
+    .bind(&payload.semantic_type)
     .bind(payload.dataset_id)
     .fetch_one(&mut *tx).await {
         Ok(row) => row.get("id"),
@@ -53,8 +54,8 @@ pub async fn save_mapping(
     let constraints_json = serde_json::to_value(&payload.default_constraints).unwrap();
     let def_res = sqlx::query(
         r#"
-        INSERT INTO semantic_definitions (node_id, source_id, target_table, sql_expression, default_constraints, alias_names, default_agg)
-        VALUES ($1, $2, $3, $4, $5, $6, $7) 
+        INSERT INTO semantic_definitions (node_id, source_id, target_table, sql_expression, default_constraints, alias_names, default_agg, value_format)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
         ON CONFLICT (node_id) 
         DO UPDATE SET 
             source_id = EXCLUDED.source_id, 
@@ -62,7 +63,8 @@ pub async fn save_mapping(
             sql_expression = EXCLUDED.sql_expression, 
             default_constraints = EXCLUDED.default_constraints, 
             alias_names = EXCLUDED.alias_names, 
-            default_agg = EXCLUDED.default_agg
+            default_agg = EXCLUDED.default_agg, 
+            value_format = EXCLUDED.value_format
         "#
     )
     .bind(node_id)
@@ -72,6 +74,7 @@ pub async fn save_mapping(
     .bind(constraints_json)
     .bind(&payload.alias_names)
     .bind(&payload.default_agg)
+    .bind(&payload.value_format)
     .execute(&mut *tx).await;
 
     if let Err(e) = def_res {
@@ -139,13 +142,13 @@ pub async fn delete_mapping(
 pub async fn list_mappings(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let rows = sqlx::query_as::<Postgres, FullSemanticNode>(
         r#"
-        SELECT n.id, n.node_key, n.label, n.node_role, d.source_id, d.target_table, d.sql_expression, 
-               d.default_constraints, d.alias_names, d.default_agg, n.dataset_id,
+        SELECT n.id, n.node_key, n.label, n.node_role, n.semantic_type, d.source_id, d.target_table, d.sql_expression, 
+               d.default_constraints, d.alias_names, d.default_agg, n.dataset_id, d.value_format,
                COALESCE(array_agg(r.dimension_node_id) FILTER (WHERE r.dimension_node_id IS NOT NULL), '{}') as supported_dimension_ids
         FROM ontology_nodes n 
         JOIN semantic_definitions d ON n.id = d.node_id
         LEFT JOIN metric_dimension_rels r ON n.id = r.metric_node_id
-        GROUP BY n.id, n.node_key, n.label, n.node_role, d.source_id, d.target_table, d.sql_expression, d.default_constraints, d.alias_names, d.default_agg, n.dataset_id
+        GROUP BY n.id, n.node_key, n.label, n.node_role, n.semantic_type, d.source_id, d.target_table, d.sql_expression, d.default_constraints, d.alias_names, d.default_agg, n.dataset_id, d.value_format
         "#
     ).fetch_all(&state.db).await;
 
@@ -344,8 +347,8 @@ pub async fn list_data_sources(State(state): State<Arc<AppState>>) -> impl IntoR
 /// 内部辅助：热重载内存语义索引
 async fn refresh_fst_cache(state: &AppState) -> anyhow::Result<()> {
     let nodes = sqlx::query_as::<Postgres, FullSemanticNode>(
-        "SELECT n.id, n.node_key, n.label, n.node_role, d.source_id, d.target_table, d.sql_expression, 
-                d.default_constraints, d.alias_names, d.default_agg, n.dataset_id, 
+        "SELECT n.id, n.node_key, n.label, n.node_role, n.semantic_type, d.source_id, d.target_table, d.sql_expression, 
+                d.default_constraints, d.alias_names, d.default_agg, d.value_format, n.dataset_id, 
                 '{}'::uuid[] as supported_dimension_ids 
          FROM ontology_nodes n 
          JOIN semantic_definitions d ON n.id = d.node_id"
@@ -358,7 +361,7 @@ async fn refresh_fst_cache(state: &AppState) -> anyhow::Result<()> {
 
 async fn full_reload_semantic_engine(state: &AppState) -> anyhow::Result<()> {
     let nodes = sqlx::query_as::<Postgres, FullSemanticNode>(
-        "SELECT n.id, n.node_key, n.label, n.node_role, d.source_id, d.target_table, d.sql_expression, d.default_constraints, d.alias_names, d.default_agg, n.dataset_id, 
+        "SELECT n.id, n.node_key, n.label, n.node_role, n.semantic_type, d.source_id, d.target_table, d.sql_expression, d.default_constraints, d.alias_names, d.default_agg, n.dataset_id, d.value_format,
         '{}'::uuid[] as supported_dimension_ids FROM ontology_nodes n JOIN semantic_definitions d ON n.id = d.node_id"
     ).fetch_all(&state.db).await?;
 

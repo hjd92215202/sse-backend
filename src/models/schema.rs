@@ -15,6 +15,7 @@ pub struct FullSemanticNode {
     pub node_key: String,
     pub label: String,
     pub node_role: String, // METRIC / DIMENSION
+    pub semantic_type: String,
     pub source_id: String,
     pub target_table: String,
     pub sql_expression: String,
@@ -27,6 +28,7 @@ pub struct FullSemanticNode {
     #[sqlx(default)]
     pub supported_dimension_ids: Vec<Uuid>,
     pub dataset_id: Option<Uuid>,
+    pub value_format: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -34,6 +36,7 @@ pub struct CreateNodeRequest {
     pub node_key: String,
     pub label: String,
     pub node_role: String,
+    pub semantic_type: String,
     pub source_id: String,
     pub target_table: String,
     pub sql_expression: String,
@@ -42,6 +45,7 @@ pub struct CreateNodeRequest {
     pub supported_dimension_ids: Vec<Uuid>,
     pub default_agg: String,
     pub dataset_id: Option<Uuid>,
+    pub value_format: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, FromRow, Clone)]

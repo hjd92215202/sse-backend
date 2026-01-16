@@ -54,13 +54,13 @@ async fn main() -> anyhow::Result<()> {
     // 这里的 SQL 必须与 mapping.rs 中的 list 逻辑保持高度一致
     let mappings_res = sqlx::query_as::<sqlx::Postgres, FullSemanticNode>(
         r#"
-        SELECT n.id, n.node_key, n.label, n.node_role, d.source_id, d.target_table, d.sql_expression, 
+        SELECT n.id, n.node_key, n.label, n.node_role, n.semantic_type, d.source_id, d.target_table, d.sql_expression, d.value_format, 
                d.default_constraints, d.alias_names, d.default_agg, n.dataset_id,
                COALESCE(array_agg(r.dimension_node_id) FILTER (WHERE r.dimension_node_id IS NOT NULL), '{}') as supported_dimension_ids
         FROM ontology_nodes n 
         JOIN semantic_definitions d ON n.id = d.node_id
         LEFT JOIN metric_dimension_rels r ON n.id = r.metric_node_id
-        GROUP BY n.id, n.node_key, n.label, n.node_role, d.source_id, d.target_table, d.sql_expression, d.default_constraints, d.alias_names, d.default_agg, n.dataset_id
+        GROUP BY n.id, n.node_key, n.label, n.node_role, n.semantic_type, d.source_id, d.target_table, d.sql_expression, d.default_constraints, d.alias_names, d.default_agg, n.dataset_id, d.value_format
         "#
     )
     .fetch_all(&db)

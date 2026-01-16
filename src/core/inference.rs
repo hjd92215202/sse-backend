@@ -36,124 +36,93 @@ impl SemanticInferenceEngine {
         info!("分词器自定义词典已热重载，新增/覆盖词汇数量: {}", cnt); // 实际数量在循环外记录更准
     }
 
-    // 使用 instrument 宏自动创建一个名为 infer 的日志范围，跳过 state 的记录以免日志冗余
-    #[instrument(skip(self, state), fields(query = %query))]
-    pub async fn infer(
-        &self,
-        state: Arc<AppState>,
-        query: &str,
-    ) -> anyhow::Result<InferenceResult> {
+        #[instrument(skip(self, state), fields(query = %query))]
+    pub async fn infer(&self, state: Arc<AppState>, query: &str) -> anyhow::Result<InferenceResult> {
         let fst = state.fst.read().await;
-        info!("开始进行语义推理: {}", query);
-
         let words = self.jieba.cut(query, false);
         debug!("分词结果: {:?}", words);
 
         let mut target_metrics = Vec::new();
-        let mut potential_dims = Vec::new();
+        let mut potential_dims = Vec::new(); // 维度实例匹配
+        let mut hit_dimension_types = HashSet::new(); // 已命中的维度类型节点
 
-        // A. 预提取日期
+        // A. 预提取：通用正则捕获
         let date_regex = Regex::new(r"(\d{4}-\d{2}-\d{2})").unwrap();
         let captured_date = date_regex.captures(query).map(|cap| cap[1].to_string());
-        if let Some(ref d) = captured_date {
-            info!("检测到日期文本: {}", d);
-        }
 
-        // B. 语义片段匹配
-        for word in words {
+        // B. 词法/语义扫描
+        for (idx, word) in words.iter().enumerate() {
             let w = word.to_lowercase();
 
-            // 1. 匹配 FST 词库 (Label 或别名)
+            // 1. 尝试匹配 FST (本体类识别)
             for entry in fst.node_cache.iter() {
                 let n = entry.value();
                 if n.label == w || n.alias_names.contains(&w) {
-                    debug!("FST 命中节点: {} (Role: {})", n.label, n.node_role);
                     if n.node_role == "METRIC" {
                         target_metrics.push(n.clone());
-                    }
-                    // 如果是维度且包含时间语义，且捕获到了日期，直接锁定
-                    if n.node_role == "DIMENSION"
-                        && captured_date.is_some()
-                        && (n.node_key.contains("date") || n.label.contains("时间"))
-                    {
-                        debug!(
-                            "自动绑定日期 {} -> 维度 {}",
-                            captured_date.as_ref().unwrap(),
-                            n.label
-                        );
-                        potential_dims.push((n.clone(), captured_date.clone().unwrap()));
+                    } else if n.node_role == "DIMENSION" {
+                        hit_dimension_types.insert(n.id);
+                        
+                        // 【优化】：动态值推断
+                        // 如果用户说“结算平台是C公司”，FST 命中了“结算平台”，
+                        // 逻辑：看后面一个词（words[idx+1]），如果不是指标且不是已知码值，视为动态 Value
+                        if idx + 1 < words.len() {
+                            let next_word = words[idx + 1].trim();
+                            if next_word != "是" && next_word != "为" && next_word.len() > 1 {
+                                // 简单判定：如果 next_word 在 FST 没命中，就当它是值
+                                potential_dims.push((n.clone(), next_word.to_string()));
+                            }
+                        }
                     }
                 }
             }
 
-            // 2. 匹配 A-Box (码值库推理)
-            let val_rows = sqlx::query(
-                "SELECT dimension_node_id, value_code, value_label FROM dimension_values WHERE value_label = $1",
-            )
-            .bind(word)
-            .fetch_all(&state.db)
-            .await?;
-
+            // 2. 尝试匹配 A-Box (码值索引)
+            let val_rows = sqlx::query("SELECT dimension_node_id, value_code FROM dimension_values WHERE value_label = $1")
+                .bind(*word).fetch_all(&state.db).await?;
             for row in val_rows {
-                let dim_id: Uuid = row.get("dimension_node_id");
-                let code: String = row.get("value_code");
-                let val_label: String = row.get("value_label");
-                // 找到对应的维度定义
-                if let Some(dim_node) = fst.node_cache.iter().find(|e| e.value().id == dim_id) {
-                    debug!(
-                        "A-Box 识别码值实例: {} -> 归属维度: {}",
-                        val_label,
-                        dim_node.value().label
-                    );
-                    potential_dims.push((dim_node.value().clone(), code));
+                let dim_id: Uuid = row.get(0);
+                if let Some(dn) = fst.node_cache.iter().find(|e| e.value().id == dim_id) {
+                    potential_dims.push((dn.value().clone(), row.get(1)));
                 }
             }
         }
 
-        // C. 意图锚点判定
+        // C. 锚点确定
         if target_metrics.is_empty() {
-            warn!("推理失败: 无法在提问中找到指标锚点");
-            return Err(anyhow::anyhow!("未能在本体中定位到指标锚点"));
+            warn!("未识别到指标锚点");
+            return Err(anyhow::anyhow!("未识别到指标锚点"));
         }
-
-        // 如果有多个指标，暂取第一个（未来可增加指标消歧逻辑）
         let metric = target_metrics[0].clone();
-        info!("锁定指标锚点: {} (ID: {})", metric.label, metric.id);
 
-        // D. 语义消歧 (核心推理：解决同名维度冲突)
-        // 仅保留指标 T-Box 显式关联的维度
-        debug!("开始执行 T-Box 关联消歧...");
-        let supported_dim_ids: HashSet<Uuid> = sqlx::query!(
-            "SELECT dimension_node_id FROM metric_dimension_rels WHERE metric_node_id = $1",
-            metric.id
-        )
-        .fetch_all(&state.db)
-        .await?
-        .into_iter()
-        .map(|r| r.dimension_node_id)
-        .collect();
-
-        debug!("该指标允许的维度 ID 集合: {:?}", supported_dim_ids);
+        // D. 本体关系推理 (T-Box Check & Auto-Binding)
+        let supported_dim_ids: HashSet<Uuid> = sqlx::query!("SELECT dimension_node_id FROM metric_dimension_rels WHERE metric_node_id = $1", metric.id)
+            .fetch_all(&state.db).await?.into_iter().map(|r| r.dimension_node_id).collect();
 
         let mut final_filters = Vec::new();
+
+        // 1. 处理 A-Box 或 动态推断出的过滤值
         for (dim, val) in potential_dims {
             if supported_dim_ids.contains(&dim.id) {
-                info!(
-                    "验证通过: 维度 '{}' (值: {}) 与指标 '{}' 连通",
-                    dim.label, val, metric.label
-                );
                 final_filters.push((dim, val));
-            } else {
-                warn!(
-                    "丢弃冲突维度: '{}' 不在指标 '{}' 的 T-Box 关联范围内",
-                    dim.label, metric.label
-                );
             }
         }
 
-        Ok(InferenceResult {
-            metric,
-            filters: final_filters,
-        })
+        // 2. 【核心优化】：处理时间类推断
+        // 如果捕获到了日期，但维度实例匹配没结果，则寻找该指标关联的所有 DATE 类型的维度
+        if captured_date.is_some() {
+            let date_val = captured_date.unwrap();
+            for dim_id in &supported_dim_ids {
+                if let Some(dim_node) = fst.node_cache.iter().find(|e| e.value().id == *dim_id) {
+                    if dim_node.value().semantic_type == "DATE" {
+                        // 自动绑定日期到该指标关联的时间列
+                        info!("基于 T-Box 类型推理：将日期 {} 绑定至维度 {}", date_val, dim_node.value().label);
+                        final_filters.push((dim_node.value().clone(), date_val.clone()));
+                    }
+                }
+            }
+        }
+
+        Ok(InferenceResult { metric, filters: final_filters })
     }
 }
